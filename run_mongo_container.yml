@@ -1,0 +1,30 @@
+- name: Manage Docker containers
+  hosts: contest_mongo
+  become: true
+  tasks:
+    - name: Check if Docker volume exists
+      docker_volume_info:
+        name: mongo
+        state: present
+
+    - name: Pull the Docker image
+      docker_image:
+        name: mongo
+        tag: latest
+        source: pull
+
+    - name: Remove the existing mongo container if running
+      docker_container:
+        name: mongo
+        state: absent
+
+    - name: Run Docker container
+      docker_container:
+        restart_policy: always
+        name: mongo
+        image: mongo:latest
+        state: started
+        ports:
+          - "27017:27017"
+        volumes:
+          - mongo:/data/db
