@@ -83,7 +83,7 @@
 
     - name: Change ownership of Kafka directory
       file:
-        path: "{{ kafka_install_dir }}/kafka"
+        path: "{{ kafka_install_dir }}/kafka_{{ scala_version }}-{{ kafka_version }}"
         owner: "{{ kafka_user }}"
         group: "{{ kafka_group }}"
         recurse: yes
