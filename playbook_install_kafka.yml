@@ -1,0 +1,247 @@
+---
+- name: Kafka Install Playbook
+  hosts: contest_kafka
+  become: yes
+  vars:
+    kafka_version: "3.9.0"
+    scala_version: "2.13"
+    kafka_install_dir: "/opt"
+    kafka_user: "kafka"
+    kafka_group: "kafka"
+    kafka_bin: "/opt/kafka/bin"
+    zookeeper_port: 2181
+    kafka_port: 9092
+    kafka_log_dir: "/opt/kafka/logs"
+    server_properties_path: "/opt/kafka/config/server.properties"
+    zookeeper_properties_path: "/opt/kafka/config/zookeeper.properties"
+    kafka_service_file: "/etc/systemd/system/kafka.service"
+    zookeeper_service_file: "/etc/systemd/system/zookeeper.service"
+    topic_to_delete: "test-topic"
+
+  tasks:
+
+    ## 1. 사전 준비 사항
+
+    ### 1.1. 시스템 업데이트
+    - name: Update all system packages to the latest version
+      yum:
+        name: "*"
+        state: latest
+        update_cache: yes
+
+    ### 1.2. Java 설치 JVM version 23
+    - name: Install Java Development Kit (Amazon Corretto 23)
+      yum:
+        name: java-23-amazon-corretto.x86_64
+        state: present
+
+    - name: Ensure Java is installed
+      command: java -version
+      register: java_version
+      changed_when: false
+
+    - name: Display Java version
+      debug:
+        msg: "{{ java_version.stderr_lines[0] }}"
+
+    ## 2. Kafka 바이너리 다운로드 및 설치
+
+    ### 2.1. Kafka 다운로드
+    - name: Download Apache Kafka tarball
+      get_url:
+        url: "https://downloads.apache.org/kafka/{{ kafka_version }}/kafka_{{ scala_version }}-{{ kafka_version }}.tgz"
+        dest: "/tmp/kafka_{{ scala_version }}-{{ kafka_version }}.tgz"
+        mode: '0755'
+
+    - name: Extract Kafka tarball to /opt
+      unarchive:
+        src: "/tmp/kafka_{{ scala_version }}-{{ kafka_version }}.tgz"
+        dest: "{{ kafka_install_dir }}"
+        remote_src: yes
+        creates: "{{ kafka_install_dir }}/kafka_{{ scala_version }}-{{ kafka_version }}"
+
+    - name: Create symbolic link /opt/kafka -> /opt/kafka_{{ scala_version }}-{{ kafka_version }}
+      file:
+        src: "{{ kafka_install_dir }}/kafka_{{ scala_version }}-{{ kafka_version }}"
+        dest: "{{ kafka_install_dir }}/kafka"
+        state: link
+        force: yes
+
+    ### Kafka 사용자 생성 및 권한 설정
+    - name: Create kafka group
+      group:
+        name: "{{ kafka_group }}"
+        state: present
+
+    - name: Create kafka user
+      user:
+        name: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        shell: /sbin/nologin
+        create_home: no
+        state: present
+
+    - name: Change ownership of Kafka directory
+      file:
+        path: "{{ kafka_install_dir }}/kafka_{{ scala_version }}-{{ kafka_version }}"
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        recurse: yes
+
+    ## 3. Kafka 구성
+
+    - name: Update server.properties with custom log directory
+      lineinfile:
+        path: "{{ server_properties_path }}"
+        regexp: '^log\.dirs='
+        line: "log.dirs={{ kafka_log_dir }}"
+        backup: yes
+
+    - name: Enable topic deletion in server.properties
+      lineinfile:
+        path: "{{ server_properties_path }}"
+        regexp: '^delete\.topic\.enable='
+        line: "delete.topic.enable=true"
+        backup: yes
+
+    ## 4. 시스템 서비스로 설정
+
+    ### 4.1. ZooKeeper 서비스 파일 생성
+    - name: Create ZooKeeper systemd service file
+      copy:
+        dest: "{{ zookeeper_service_file }}"
+        content: |
+          [Unit]
+          Description=Apache ZooKeeper Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ kafka_user }}
+          ExecStart={{ kafka_install_dir }}/kafka/bin/zookeeper-server-start.sh {{ zookeeper_properties_path }}
+          ExecStop={{ kafka_install_dir }}/kafka/bin/zookeeper-server-stop.sh
+          Restart=on-abnormal
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - Reload systemd
+
+    ### 4.2. Kafka 서비스 파일 생성
+    - name: Create Kafka systemd service file
+      copy:
+        dest: "{{ kafka_service_file }}"
+        content: |
+          [Unit]
+          Description=Apache Kafka Server
+          After=zookeeper.service
+
+          [Service]
+          Type=simple
+          User={{ kafka_user }}
+          ExecStart={{ kafka_install_dir }}/kafka/bin/kafka-server-start.sh {{ server_properties_path }}
+          ExecStop={{ kafka_install_dir }}/kafka/bin/kafka-server-stop.sh
+          Restart=on-abnormal
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - Reload systemd
+
+    ### 4.3. 서비스 활성화 및 시작
+    - name: Enable and start ZooKeeper service
+      systemd:
+        name: zookeeper
+        enabled: yes
+        state: started
+
+    - name: Enable and start Kafka service
+      systemd:
+        name: kafka
+        enabled: yes
+        state: started
+
+    ### 4.4. 서비스 상태 확인
+    - name: Check ZooKeeper service status
+      systemd:
+        name: zookeeper
+        state: started
+      register: zookeeper_service_status
+      failed_when: zookeeper_service_status.state != "started"
+
+    - name: Display ZooKeeper service status
+      debug:
+        msg: "ZooKeeper service is running."
+
+    - name: Check Kafka service status
+      systemd:
+        name: kafka
+        state: started
+      register: kafka_service_status
+      failed_when: kafka_service_status.state != "started"
+
+    - name: Display Kafka service status
+      debug:
+        msg: "Kafka service is running."
+
+    ## 5. Kafka 테스트
+
+    ### 5.1. 토픽 생성
+    - name: Create test-topic
+      command: "{{ kafka_bin }}/kafka-topics.sh --create --topic test-topic --bootstrap-server localhost:{{ kafka_port }} --replication-factor 1 --partitions 1"
+      become_user: "{{ kafka_user }}"
+      args:
+        creates: "{{ kafka_log_dir }}/test-topic"
+
+    ### 5.2. 프로듀서 및 컨슈머 테스트
+    - name: Start Kafka producer and send test message
+      shell: |
+        echo "Test message from Ansible Playbook" | {{ kafka_bin }}/kafka-console-producer.sh --topic test-topic --bootstrap-server localhost:{{ kafka_port }} --producer.config /dev/null
+      become_user: "{{ kafka_user }}"
+      register: producer_output
+      changed_when: false
+
+    - name: Consume the test message
+      shell: "{{ kafka_bin }}/kafka-console-consumer.sh --topic test-topic --from-beginning --bootstrap-server localhost:{{ kafka_port }} --max-messages 1"
+      become_user: "{{ kafka_user }}"
+      register: consumer_output
+      changed_when: false
+
+    - name: Verify the test message
+      assert:
+        that:
+          - "'Test message from Ansible Playbook' in consumer_output.stdout"
+        fail_msg: "The test message was not received by the consumer."
+        success_msg: "Kafka producer and consumer test succeeded. Message received: {{ consumer_output.stdout }}"
+
+    ### 5.3. Kafka 토픽 삭제
+
+    - name: Get list of current Kafka topics
+      command: "{{ kafka_bin }}/kafka-topics.sh --list --bootstrap-server localhost:{{ kafka_port }}"
+      become_user: "{{ kafka_user }}"
+      register: kafka_topics
+
+    - name: Delete Kafka topic '{{ topic_to_delete }}' if it exists
+      command: "{{ kafka_bin }}/kafka-topics.sh --delete --topic {{ topic_to_delete }} --bootstrap-server localhost:{{ kafka_port }}"
+      become_user: "{{ kafka_user }}"
+      when: "'{{ topic_to_delete }}' in kafka_topics.stdout_lines"
+      notify:
+        - Restart Kafka
+
+    ## 6. 시스템 서비스로 설정 (이전 단계에서 이미 수행됨)
+    # 이 섹션은 이전 단계에서 이미 포함되어 있으므로 제거했습니다.
+
+  handlers:
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Restart Kafka
+      systemd:
+        name: kafka
+        state: restarted
